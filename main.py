@@ -125,15 +125,74 @@ class PJSKPlugin(Star):
             plugin_config._config = config
     
     async def initialize(self):
-        """Initialize plugin - download resources on startup."""
+        """Initialize plugin - download resources and install playwright browser."""
         logger.info("正在初始化 PJSK 表情插件...")
         try:
+            # Install playwright browser if not exists
+            await self._ensure_playwright_browser()
+            # Download resources
             await prepare_resource()
             self._initialized = True
             logger.info(f"PJSK 表情插件初始化完成，加载了 {len(LOADED_STICKER_INFO)} 个表情")
         except Exception as e:
             logger.error(f"PJSK 表情插件初始化失败: {e}")
             raise
+    
+    async def _ensure_playwright_browser(self):
+        """Install playwright chromium browser if not installed."""
+        import subprocess
+        import sys
+        import platform
+        
+        try:
+            # Check if chromium is already installed by trying to import and check
+            from playwright.async_api import async_playwright
+            async with async_playwright() as p:
+                # Try to get browser executable path
+                try:
+                    browser = await p.chromium.launch()
+                    await browser.close()
+                    logger.debug("Playwright chromium 已安装")
+                    return
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        
+        # On Linux, install system dependencies first
+        if platform.system() == "Linux":
+            logger.info("正在安装 Playwright 系统依赖...")
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-m", "playwright", "install-deps", "chromium"],
+                    capture_output=True,
+                    text=True,
+                    timeout=300
+                )
+                if result.returncode == 0:
+                    logger.info("Playwright 系统依赖安装成功")
+                else:
+                    logger.warning(f"Playwright 系统依赖安装可能有问题: {result.stderr}")
+            except Exception as e:
+                logger.warning(f"Playwright 系统依赖安装失败 (可能需要 sudo): {e}")
+        
+        # Install chromium
+        logger.info("正在安装 Playwright chromium 浏览器...")
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 minutes timeout
+            )
+            if result.returncode == 0:
+                logger.info("Playwright chromium 安装成功")
+            else:
+                logger.warning(f"Playwright 安装可能有问题: {result.stderr}")
+        except subprocess.TimeoutExpired:
+            logger.error("Playwright 安装超时")
+        except Exception as e:
+            logger.error(f"Playwright 安装失败: {e}")
     
     @filter.command("pjsk")
     async def pjsk_generate(self, event: AstrMessageEvent):
