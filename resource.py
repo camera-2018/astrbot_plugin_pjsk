@@ -39,21 +39,31 @@ JINJA_ENV = jinja2.Environment(
 
 def init_data_folder(data_dir: Path = None):
     """Initialize data folder paths. Called from main.py with StarTools.get_data_dir()."""
-    global DATA_FOLDER, FONT_FOLDER, RESOURCE_FOLDER, STICKER_INFO_CACHE, CACHE_FOLDER, FONT_PATH
-    
+    global \
+        DATA_FOLDER, \
+        FONT_FOLDER, \
+        RESOURCE_FOLDER, \
+        STICKER_INFO_CACHE, \
+        CACHE_FOLDER, \
+        FONT_PATH
+
     if data_dir:
         DATA_FOLDER = data_dir
     else:
         # Fallback for testing
         DATA_FOLDER = Path.cwd() / "data" / "pjsk"
-    
+        
     FONT_FOLDER = DATA_FOLDER / "fonts"
     RESOURCE_FOLDER = DATA_FOLDER / "resource"
     STICKER_INFO_CACHE = DATA_FOLDER / "characters.json"
     CACHE_FOLDER = DATA_FOLDER / "cache"
-    
+
     # Use bundled font if exists, otherwise use data folder
-    FONT_PATH = BUNDLED_FONT_PATH if BUNDLED_FONT_PATH.exists() else FONT_FOLDER / "YurukaFangTang.ttf"
+    FONT_PATH = (
+        BUNDLED_FONT_PATH
+        if BUNDLED_FONT_PATH.exists()
+        else FONT_FOLDER / "YurukaFangTang.ttf"
+    )
 
 
 def make_cache_key(obj: Any) -> str:
@@ -68,14 +78,10 @@ async def ensure_directories():
     for folder in (DATA_FOLDER, FONT_FOLDER, RESOURCE_FOLDER, CACHE_FOLDER):
         if not folder.exists():
             folder.mkdir(parents=True)
-    
+
     # Clear cache if configured
-    if CACHE_FOLDER.exists():
-        for f in (
-            CACHE_FOLDER.iterdir()
-            if config.pjsk_clear_cache
-            else CACHE_FOLDER.glob("*.jpeg")
-        ):
+    if config.pjsk_clear_cache and CACHE_FOLDER.exists():
+        for f in CACHE_FOLDER.iterdir():
             f.unlink()
 
 
@@ -101,6 +107,7 @@ async def write_cache(filename: str, data: bytes):
 
 class StickerText(BaseModel):
     """Default text configuration for a sticker."""
+
     text: str
     x: int
     y: int
@@ -110,6 +117,7 @@ class StickerText(BaseModel):
 
 class StickerInfo(BaseModel):
     """Information about a sticker."""
+
     sticker_id: str = Field(..., alias="id")
     name: str
     character: str
@@ -141,7 +149,9 @@ def select_or_get_random(sticker_id: Optional[str] = None) -> Optional[StickerIn
     return (
         next((x for x in LOADED_STICKER_INFO if sticker_id == x.sticker_id), None)
         if sticker_id
-        else random.choice(LOADED_STICKER_INFO) if LOADED_STICKER_INFO else None
+        else random.choice(LOADED_STICKER_INFO)
+        if LOADED_STICKER_INFO
+        else None
     )
 
 
@@ -150,7 +160,7 @@ async def check_and_download_font():
     # If bundled font exists, no need to download
     if BUNDLED_FONT_PATH.exists():
         return
-    
+
     if not FONT_PATH.exists():
         font_name = FONT_PATH.name
         path = anyio.Path(FONT_FOLDER) / font_name
@@ -161,7 +171,7 @@ async def check_and_download_font():
 async def load_sticker_info():
     """Load sticker information from remote or cache."""
     await ensure_directories()
-    
+
     path = anyio.Path(STICKER_INFO_CACHE)
     urls = append_prefix("src/characters.json", config.pjsk_assets_prefix)
     try:
