@@ -16,6 +16,7 @@ from .render import (
     DEFAULT_LINE_SPACING,
     DEFAULT_STROKE_COLOR,
     DEFAULT_STROKE_WIDTH,
+    close_browser,
     get_all_characters_grid,
     get_character_stickers_grid,
     get_sticker,
@@ -26,7 +27,7 @@ from .resource import (
     select_or_get_random,
     LOADED_STICKER_INFO,
 )
-from .utils import ResolveValueError, resolve_value
+from .utils import ResolveValueError, resolve_value, close_http_client
 
 
 HELP_TEXT = """
@@ -66,7 +67,7 @@ def parse_args(args_str: str) -> dict:
         "stroke_color": None,
         "line_spacing": None,
     }
-    
+
     parts = args_str.split()
     i = 0
     while i < len(parts):
@@ -103,57 +104,58 @@ def parse_args(args_str: str) -> dict:
             i += 1
         else:
             i += 1
-    
+
     return result
 
 
 @register(
     "astrbot_plugin_pjsk",
-    "Agnes4m, LgCookie",
-    "Project Sekai 表情包制作插件",
+    "camera-2018&RC-CHN",
+    "Project Sekai 表情包制作插件,参考https://github.com/Agnes4m/nonebot_plugin_pjsk编写",
     "1.0.0",
-    "https://github.com/Agnes4m/nonebot_plugin_pjsk"
+    "https://github.com/camera-2018/astrbot_plugin_pjsk",
 )
 class PJSKPlugin(Star):
     """Project Sekai Sticker Plugin for AstrBot."""
-    
+
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
         self._initialized = False
         # Update global config with AstrBot config
         if config:
             plugin_config.update_config(config)
-    
+            
     async def initialize(self):
         """Initialize plugin - download resources and install playwright browser."""
         from astrbot.api.star import StarTools
         from .resource import init_data_folder
-        
         logger.info("正在初始化 PJSK 表情插件...")
         try:
             # Initialize data folder with AstrBot's data directory
             data_dir = StarTools.get_data_dir("astrbot_plugin_pjsk")
             init_data_folder(data_dir)
-            
             # Install playwright browser if not exists
             await self._ensure_playwright_browser()
             # Download resources
             await prepare_resource()
             self._initialized = True
-            logger.info(f"PJSK 表情插件初始化完成，加载了 {len(LOADED_STICKER_INFO)} 个表情")
+            logger.info(
+                f"PJSK 表情插件初始化完成，加载了 {len(LOADED_STICKER_INFO)} 个表情"
+            )
         except Exception as e:
             logger.error(f"PJSK 表情插件初始化失败: {e}")
             raise
-    
+
     async def _ensure_playwright_browser(self):
         """Install playwright chromium browser if not installed."""
         import asyncio
         import sys
         import platform
-        
+
         try:
             # Check if chromium is already installed by trying to import and check
             from playwright.async_api import async_playwright
+
             async with async_playwright() as p:
                 # Try to get browser executable path
                 try:
@@ -165,33 +167,43 @@ class PJSKPlugin(Star):
                     pass
         except Exception:
             pass
-        
+
         # On Linux, install system dependencies first
         if platform.system() == "Linux":
             logger.info("正在安装 Playwright 系统依赖...")
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    sys.executable, "-m", "playwright", "install-deps", "chromium",
+                    sys.executable,
+                    "-m",
+                    "playwright",
+                    "install-deps",
+                    "chromium",
                     stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
+                    stderr=asyncio.subprocess.PIPE,
                 )
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
                 if proc.returncode == 0:
                     logger.info("Playwright 系统依赖安装成功")
                 else:
-                    logger.warning(f"Playwright 系统依赖安装可能有问题: {stderr.decode()}")
+                    logger.warning(
+                        f"Playwright 系统依赖安装可能有问题: {stderr.decode()}"
+                    )
             except asyncio.TimeoutError:
                 logger.warning("Playwright 系统依赖安装超时")
             except Exception as e:
                 logger.warning(f"Playwright 系统依赖安装失败 (可能需要 sudo): {e}")
-        
+
         # Install chromium
         logger.info("正在安装 Playwright chromium 浏览器...")
         try:
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "playwright", "install", "chromium",
+                sys.executable,
+                "-m",
+                "playwright",
+                "install",
+                "chromium",
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
             if proc.returncode == 0:
@@ -202,46 +214,46 @@ class PJSKPlugin(Star):
             logger.error("Playwright 安装超时")
         except Exception as e:
             logger.error(f"Playwright 安装失败: {e}")
-    
+
     @filter.command("pjsk")
     async def pjsk_generate(self, event: AstrMessageEvent):
         """生成 Project Sekai 表情包"""
         if not self._initialized:
             yield event.plain_result("插件正在初始化中，请稍后再试...")
             return
-        
+
         # Get command arguments
         message = event.message_str
         # Remove command prefix and command name
         args_str = message
         for prefix in ["/pjsk", "pjsk"]:
             if args_str.startswith(prefix):
-                args_str = args_str[len(prefix):].strip()
+                args_str = args_str[len(prefix) :].strip()
                 break
-        
+
         # Check for help
         if args_str in ("-h", "--help", "帮助"):
             yield event.plain_result(HELP_TEXT)
             return
-        
+
         # Parse arguments
         args = parse_args(args_str)
-        
+
         # Get sticker
         sticker_id: Optional[str] = args["id"]
         selected_sticker = select_or_get_random(sticker_id)
-        
+
         if sticker_id and not selected_sticker:
             yield event.plain_result(f"没有找到 ID 为 {sticker_id} 的表情")
             return
-        
+
         if not selected_sticker:
             yield event.plain_result("没有可用的表情，请检查资源是否下载完成")
             return
-        
+
         default_text = selected_sticker.default_text
         text = " ".join(args["text"]) if args["text"] else default_text.text
-        
+
         try:
             kw = make_sticker_render_kwargs(
                 selected_sticker,
@@ -257,7 +269,9 @@ class PJSKPlugin(Star):
                 font_color=args["color"] or selected_sticker.color,
                 stroke_width=resolve_value(args["stroke_width"], DEFAULT_STROKE_WIDTH),
                 stroke_color=args["stroke_color"] or DEFAULT_STROKE_COLOR,
-                line_spacing=resolve_value(args["line_spacing"], DEFAULT_LINE_SPACING, float),
+                line_spacing=resolve_value(
+                    args["line_spacing"], DEFAULT_LINE_SPACING, float
+                ),
                 auto_adjust=(args["size"] is None),
             )
             image_bytes = await get_sticker(**kw)
@@ -268,31 +282,39 @@ class PJSKPlugin(Star):
             logger.error(f"生成表情时出错: {e}")
             yield event.plain_result("生成表情时出错，请检查后台日志")
             return
-        
-        # Save to temp file and send
-        temp_path = os.path.join(tempfile.gettempdir(), f"pjsk_{hash(text)}.png")
-        with open(temp_path, "wb") as f:
-            f.write(image_bytes)
-        
-        yield event.image_result(temp_path)
-    
+
+        # Save to temp file and send, then clean up
+        temp_path = os.path.join(
+            tempfile.gettempdir(), f"pjsk_{hash(text)}_{id(event)}.png"
+        )
+        try:
+            with open(temp_path, "wb") as f:
+                f.write(image_bytes)
+            yield event.image_result(temp_path)
+        finally:
+            # Clean up temporary file after sending
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
     @filter.command("pjsk列表")
     async def pjsk_list(self, event: AstrMessageEvent):
         """查看 PJSK 表情列表"""
         if not self._initialized:
             yield event.plain_result("插件正在初始化中，请稍后再试...")
             return
-        
+
         # Get character name if provided
         message = event.message_str
         args_str = message
         for prefix in ["/pjsk列表", "pjsk列表"]:
             if args_str.startswith(prefix):
-                args_str = args_str[len(prefix):].strip()
+                args_str = args_str[len(prefix) :].strip()
                 break
-        
+
         character = args_str.strip() if args_str else None
-        
+
         try:
             if character:
                 # Show stickers for specific character
@@ -307,21 +329,33 @@ class PJSKPlugin(Star):
             logger.error(f"获取表情列表时出错: {e}")
             yield event.plain_result("获取表情列表时出错，请检查后台日志")
             return
-        
-        # Save to temp file and send
+
+        # Save to temp file and send, then clean up
         temp_path = os.path.join(
-            tempfile.gettempdir(), 
-            f"pjsk_list_{character or 'all'}.jpeg"
+            tempfile.gettempdir(), f"pjsk_list_{character or 'all'}_{id(event)}.jpeg"
         )
-        with open(temp_path, "wb") as f:
-            f.write(image_bytes)
-        
-        if character:
-            yield event.image_result(temp_path)
-        else:
-            yield event.image_result(temp_path)
-            yield event.plain_result("使用 /pjsk列表 <角色名> 查看该角色的所有表情 ID")
-    
+        try:
+            with open(temp_path, "wb") as f:
+                f.write(image_bytes)
+
+            if character:
+                yield event.image_result(temp_path)
+            else:
+                yield event.image_result(temp_path)
+                yield event.plain_result(
+                    "使用 /pjsk列表 <角色名> 查看该角色的所有表情 ID"
+                )
+        finally:
+            # Clean up temporary file after sending
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
     async def terminate(self):
         """Clean up when plugin is unloaded."""
+        # Close browser instance to release resources
+        await close_browser()
+        # Close HTTP client to release connections
+        await close_http_client()
         logger.info("PJSK 表情插件已卸载")

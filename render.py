@@ -6,17 +6,22 @@ from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Literal, Optional, TypedDict, Union
 
 import anyio
-from playwright.async_api import async_playwright, Page, Request, Route
+from playwright.async_api import (
+    async_playwright,
+    Browser,
+    BrowserContext,
+    Page,
+    Playwright,
+    Request,
+    Route,
+)
 from yarl import URL
 
 from .config import config
+from . import resource as res
 from .resource import (
-    DATA_FOLDER,
-    FONT_PATH,
     JINJA_ENV,
     LOADED_STICKER_INFO,
-    PLUGIN_DIR,
-    RESOURCE_FOLDER,
     StickerInfo,
     get_cache,
     make_cache_key,
@@ -32,6 +37,68 @@ DEFAULT_STROKE_COLOR = "#ffffff"
 
 ROUTER_BASE_URL = "https://pjsk.local/"
 PLUGIN_ROUTER_PREFIX = "plugin/"
+
+
+# Global browser instance for reuse
+_playwright: Optional[Playwright] = None
+_browser: Optional[Browser] = None
+_browser_context: Optional[BrowserContext] = None
+_browser_lock = asyncio.Lock()
+
+
+async def get_browser_context() -> BrowserContext:
+    """Get or create a reusable browser context.
+
+    This avoids the overhead of launching a new browser for each render,
+    significantly improving performance.
+    """
+    global _playwright, _browser, _browser_context
+
+    async with _browser_lock:
+        if _browser_context is not None and _browser is not None:
+            # Check if browser is still connected
+            if _browser.is_connected():
+                return _browser_context
+            # Browser disconnected, clean up
+            _browser_context = None
+            _browser = None
+
+        if _playwright is None:
+            _playwright = await async_playwright().start()
+
+        if _browser is None:
+            _browser = await _playwright.chromium.launch()
+
+        # Create a new context with device_scale_factor
+        _browser_context = await _browser.new_context(device_scale_factor=1)
+        return _browser_context
+
+
+async def close_browser() -> None:
+    """Close the global browser instance."""
+    global _playwright, _browser, _browser_context
+
+    async with _browser_lock:
+        if _browser_context is not None:
+            try:
+                await _browser_context.close()
+            except Exception:
+                pass
+            _browser_context = None
+
+        if _browser is not None:
+            try:
+                await _browser.close()
+            except Exception:
+                pass
+            _browser = None
+
+        if _playwright is not None:
+            try:
+                await _playwright.stop()
+            except Exception:
+                pass
+            _playwright = None
 
 
 def calc_approximate_text_width(text: str, size: int, rotate_deg: float) -> float:
@@ -66,14 +133,14 @@ async def file_router(route: Route, request: Request):
     """Handle file routes by serving local files from data or plugin dir."""
     url = URL(request.url)
     url_path = url.path[1:]  # Remove leading /
-    
+
     # Check if this is a plugin directory file (bundled fonts, etc.)
     if url_path.startswith(PLUGIN_ROUTER_PREFIX):
-        relative = url_path[len(PLUGIN_ROUTER_PREFIX):]
-        path = anyio.Path(PLUGIN_DIR / relative)
+        relative = url_path[len(PLUGIN_ROUTER_PREFIX) :]
+        path = anyio.Path(res.PLUGIN_DIR / relative)
     else:
-        path = anyio.Path(DATA_FOLDER / url_path)
-    
+        path = anyio.Path(res.DATA_FOLDER / url_path)
+
     try:
         data = await path.read_bytes()
     except Exception:
@@ -85,17 +152,17 @@ def to_router_url(path: Union[str, Path]) -> str:
     """Convert local path to router URL."""
     if not isinstance(path, Path):
         path = Path(path)
-    
+
     # Check if path is under plugin directory (for bundled resources)
     try:
-        relative = path.relative_to(PLUGIN_DIR)
+        relative = path.relative_to(res.PLUGIN_DIR)
         return f"{ROUTER_BASE_URL}{PLUGIN_ROUTER_PREFIX}{relative}".replace("\\", "/")
     except ValueError:
         pass
-    
+
     # Otherwise it's under data folder
     try:
-        relative = path.relative_to(DATA_FOLDER)
+        relative = path.relative_to(res.DATA_FOLDER)
         return f"{ROUTER_BASE_URL}{relative}".replace("\\", "/")
     except ValueError:
         # Fallback: use absolute path as URL (may not work in all cases)
@@ -104,6 +171,7 @@ def to_router_url(path: Union[str, Path]) -> str:
 
 class StickerRenderKwargs(TypedDict):
     """Arguments for sticker rendering."""
+
     image: str
     x: int
     y: int
@@ -142,7 +210,7 @@ def make_sticker_render_kwargs(
         else qor(font_size, default_text.s)
     )
     return {
-        "image": to_router_url(RESOURCE_FOLDER / info.img),
+        "image": to_router_url(res.RESOURCE_FOLDER / info.img),
         "x": qor(x, default_text.x),
         "y": qor(y, default_text.y),
         "text": text,
@@ -152,7 +220,7 @@ def make_sticker_render_kwargs(
         "stroke_color": qor(stroke_color, DEFAULT_STROKE_COLOR),
         "stroke_width": qor(stroke_width, DEFAULT_STROKE_WIDTH),
         "line_spacing": qor(line_spacing, DEFAULT_LINE_SPACING),
-        "font": to_router_url(FONT_PATH),
+        "font": to_router_url(res.FONT_PATH),
         "width": DEFAULT_WIDTH,
         "height": DEFAULT_HEIGHT,
     }
@@ -183,24 +251,29 @@ async def capture_with_playwright(
     omit_background: bool = False,
     cache_key: Optional[str] = None,
 ) -> bytes:
-    """Capture element screenshot using playwright."""
-    async with async_playwright() as p:
-        browser = await p.chromium.launch()
-        page = await browser.new_page(device_scale_factor=1)
-        
+    """Capture element screenshot using playwright.
+
+    Uses a reusable browser context for better performance.
+    Only creates a new page for each render, avoiding browser launch overhead.
+    """
+    context = await get_browser_context()
+    page = await context.new_page()
+
+    try:
         # Set up routing for local files
         await page.route(f"{ROUTER_BASE_URL}**/*", file_router)
         await page.route(ROUTER_BASE_URL, root_router)
-        
+
         await page.goto(ROUTER_BASE_URL)
         await page.set_content(html)
-        
+
         element = await page.wait_for_selector(selector)
         assert element
         img = await element.screenshot(type=image_type, omit_background=omit_background)
-        
-        await browser.close()
-        
+    finally:
+        # Always close the page to free resources
+        await page.close()
+
     if config.pjsk_use_cache and cache_key:
         await write_cache(f"{cache_key}.{image_type}", img)
     return img
@@ -224,15 +297,22 @@ async def capture_template(html: str, cache_key: Optional[str] = None) -> bytes:
 
 def use_cache(cache_key_func: Union[str, Callable], ext: Literal["png", "jpeg"]):
     """Decorator to add caching to render functions."""
+
     def decorator(func: Callable[..., Awaitable[bytes]]):
         async def wrapper(*args, **kwargs):
-            key = cache_key_func(*args, **kwargs) if callable(cache_key_func) else cache_key_func
+            key = (
+                cache_key_func(*args, **kwargs)
+                if callable(cache_key_func)
+                else cache_key_func
+            )
             if config.pjsk_use_cache:
                 cached = await get_cache(f"{key}.{ext}")
                 if cached:
                     return cached
             return await func(key, *args, **kwargs)
+
         return wrapper
+
     return decorator
 
 

@@ -19,9 +19,38 @@ from typing import (
     overload,
 )
 
-from httpx import AsyncClient
+from httpx import AsyncClient, Limits
 
 from .config import config
+
+
+# Global HTTP client for connection pooling
+_http_client: Optional[AsyncClient] = None
+
+
+def get_http_client() -> AsyncClient:
+    """Get or create a global HTTP client with connection pooling."""
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = AsyncClient(
+            proxy=config.pjsk_req_proxy,
+            timeout=config.pjsk_req_timeout,
+            limits=Limits(
+                max_connections=50,
+                max_keepalive_connections=20,
+                keepalive_expiry=30.0,
+            ),
+        )
+    return _http_client
+
+
+async def close_http_client() -> None:
+    """Close the global HTTP client."""
+    global _http_client
+    if _http_client is not None and not _http_client.is_closed:
+        await _http_client.aclose()
+        _http_client = None
+
 
 T = TypeVar("T")
 TN = TypeVar("TN", int, float)
@@ -65,26 +94,28 @@ async def async_request(
     response_type: ResponseType = ResponseType.BYTES,
     retries: int = config.pjsk_req_retry,
 ) -> Any:
-    """Async HTTP request with retry and fallback URLs."""
+    """Async HTTP request with retry and fallback URLs.
+
+    Uses a global HTTP client with connection pooling for better performance.
+    """
     if not urls:
         raise ValueError("No URL specified")
 
     url, rest = urls[0], urls[1:]
     try:
-        async with AsyncClient(
-            proxy=config.pjsk_req_proxy,
-            timeout=config.pjsk_req_timeout,
-        ) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            if response_type == ResponseType.JSON:
-                return response.json()
-            if response_type == ResponseType.TEXT:
-                return response.text
-            return response.read()
+        client = get_http_client()
+        response = await client.get(url)
+        response.raise_for_status()
+        if response_type == ResponseType.JSON:
+            return response.json()
+        if response_type == ResponseType.TEXT:
+            return response.text
+        return response.read()
 
     except Exception as e:
-        err_suffix = f"error occurred while requesting {url}: {e.__class__.__name__}: {e}"
+        err_suffix = (
+            f"error occurred while requesting {url}: {e.__class__.__name__}: {e}"
+        )
         if retries <= 0:
             if not rest:
                 raise
@@ -102,11 +133,14 @@ def append_prefix(suffix: str, prefixes: Sequence[str]) -> List[str]:
 
 def with_semaphore(semaphore: Semaphore):
     """Decorator to limit concurrency using semaphore."""
+
     def decorator(func: Callable[..., Awaitable[R]]):
         async def wrapper(*args, **kwargs) -> R:
             async with semaphore:
                 return await func(*args, **kwargs)
+
         return wrapper
+
     return decorator
 
 
@@ -118,6 +152,7 @@ def chunks(iterable: Sequence[T], size: int) -> Iterable[Sequence[T]]:
 
 class ResolveValueError(ValueError):
     """Error when resolving parameter value."""
+
     pass
 
 
@@ -127,6 +162,7 @@ def resolve_value(
     expected_type: Type[TN] = int,
 ) -> TN:
     """Resolve a value with support for relative offsets using ^ prefix."""
+
     def get_default() -> TN:
         return default() if callable(default) else default
 
