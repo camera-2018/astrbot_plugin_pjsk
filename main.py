@@ -112,7 +112,7 @@ def parse_args(args_str: str) -> dict:
     "astrbot_plugin_pjsk",
     "camera-2018&RC-CHN",
     "Project Sekai 表情包制作插件,参考https://github.com/Agnes4m/nonebot_plugin_pjsk编写",
-    "1.0.0",
+    "1.0.1",
     "https://github.com/camera-2018/astrbot_plugin_pjsk",
 )
 class PJSKPlugin(Star):
@@ -147,73 +147,51 @@ class PJSKPlugin(Star):
             raise
 
     async def _ensure_playwright_browser(self):
-        """Install playwright chromium browser if not installed.
+        """Install the playwright chromium runtime if it is missing."""
 
-        Uses playwright CLI commands for browser management instead of
-        launching a full browser instance to check installation status.
-        """
-        import asyncio
-        import sys
-        import platform
-
-        # Step 1: Check if playwright package is installed
         try:
             import playwright  # noqa: F401
         except ImportError:
             logger.error("Playwright 未安装，请执行: pip install playwright")
             raise RuntimeError("Playwright is not installed")
 
-        # Step 2: Check if chromium is already installed (lightweight check)
-        if self._is_chromium_installed():
-            logger.info("Playwright chromium 已安装，跳过安装步骤")
+        missing = self._get_missing_chromium_runtime_files()
+        if not missing:
+            logger.info("Playwright chromium 运行文件已安装，跳过安装步骤")
             return
 
-        # Step 3: On Linux, install system dependencies first
-        if platform.system() == "Linux":
-            logger.info("正在安装 Playwright 系统依赖...")
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    sys.executable,
-                    "-m",
-                    "playwright",
-                    "install-deps",
-                    "chromium",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-                if proc.returncode == 0:
-                    logger.info("Playwright 系统依赖安装成功")
-                else:
-                    logger.warning(
-                        f"Playwright 系统依赖安装可能有问题: {stderr.decode()}"
-                    )
-            except asyncio.TimeoutError:
-                logger.warning("Playwright 系统依赖安装超时")
-            except Exception as e:
-                logger.warning(f"Playwright 系统依赖安装失败 (可能需要 sudo): {e}")
-
-        # Step 4: Install chromium via playwright CLI
-        logger.info("正在安装 Playwright chromium 浏览器...")
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-m",
-                "playwright",
-                "install",
-                "chromium",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+        missing_names = ", ".join(item["name"] for item in missing)
+        missing_paths = "; ".join(str(item["install_dir"]) for item in missing)
+        if not plugin_config.pjsk_playwright_auto_install:
+            raise RuntimeError(
+                "Playwright chromium 运行文件缺失且已关闭自动安装。"
+                "请执行 `python -m playwright install chromium` 后重启插件。"
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-            if proc.returncode == 0:
-                logger.info("Playwright chromium 安装成功")
-            else:
-                logger.warning(f"Playwright 安装可能有问题: {stderr.decode()}")
-        except asyncio.TimeoutError:
-            logger.error("Playwright 安装超时")
-        except Exception as e:
-            logger.error(f"Playwright 安装失败: {e}")
+
+        logger.info(
+            f"检测到 Playwright {missing_names} 缺失，正在按需安装: {missing_paths}"
+        )
+        await self._run_playwright_install(
+            install_only_shell=self._should_install_only_chromium_shell()
+        )
+
+        missing = self._get_missing_chromium_runtime_files()
+        if missing:
+            missing_paths = "; ".join(str(item["install_dir"]) for item in missing)
+            raise RuntimeError(
+                f"Playwright chromium 安装后仍缺少运行文件: {missing_paths}"
+            )
+
+        logger.info("Playwright chromium 运行文件安装成功")
+        if not plugin_config.pjsk_playwright_install_deps:
+            import platform
+
+            if platform.system() == "Linux":
+                logger.info(
+                    "如后续浏览器启动提示系统依赖缺失，可启用 "
+                    "pjsk_playwright_install_deps 或手动执行 "
+                    "`python -m playwright install-deps chromium`"
+                )
 
     @staticmethod
     def _get_browsers_path():
@@ -241,7 +219,10 @@ class PJSKPlugin(Star):
             except (ImportError, AttributeError):
                 return None
         elif browsers_path_env:
-            return Path(browsers_path_env)
+            path = Path(browsers_path_env)
+            if not path.is_absolute():
+                path = Path(os.environ.get("INIT_CWD") or os.getcwd()) / path
+            return path
 
         system = platform.system()
         if system == "Darwin":
@@ -259,24 +240,49 @@ class PJSKPlugin(Star):
 
     @staticmethod
     def _is_chromium_installed() -> bool:
-        """Check if chromium browser binaries exist in playwright's browser directory.
+        """Check whether the chromium runtime needed by this plugin exists."""
 
-        Uses playwright's bundled ``browsers.json`` to determine the exact
-        chromium revision expected by the installed playwright version, then
-        verifies the actual browser executable exists on disk.  This avoids
-        both false negatives (e.g. wrong cache path) and false positives
-        (e.g. partial / interrupted downloads).
+        return not PJSKPlugin._get_missing_chromium_runtime_files()
+
+    @staticmethod
+    def _get_missing_chromium_runtime_files():
+        """Return missing Playwright chromium runtime artifacts.
+
+        The renderer launches Chromium in headless mode.  Newer Playwright
+        versions use ``chromium-headless-shell`` for that path, so checking only
+        ``chromium-*`` can incorrectly pass while the actual launch executable
+        is absent.
         """
+
+        missing = []
+        for requirement in PJSKPlugin._get_chromium_runtime_requirements():
+            executable = next(
+                (
+                    path
+                    for path in requirement["candidates"]
+                    if PJSKPlugin._is_executable_file(path)
+                ),
+                None,
+            )
+            if executable is None:
+                missing.append(requirement)
+        return missing
+
+    @staticmethod
+    def _get_chromium_runtime_requirements():
         import json
-        import os
-        import platform
         from pathlib import Path
 
         browsers_path = PJSKPlugin._get_browsers_path()
-        if browsers_path is None or not browsers_path.exists():
-            return False
+        if browsers_path is None:
+            return [
+                {
+                    "name": "chromium",
+                    "install_dir": Path("<unknown>"),
+                    "candidates": [],
+                }
+            ]
 
-        # --- primary check: version-aware executable verification ----------
         try:
             import playwright as pw
 
@@ -286,69 +292,239 @@ class PJSKPlugin(Star):
                 / "package"
                 / "browsers.json"
             )
-            if browsers_json.exists():
-                with open(browsers_json, encoding="utf-8") as f:
-                    data = json.load(f)
+            with open(browsers_json, encoding="utf-8") as f:
+                data = json.load(f)
+        except (ImportError, json.JSONDecodeError, OSError) as exc:
+            logger.debug(f"Playwright browsers.json 读取失败: {exc}")
+            return [
+                {
+                    "name": "chromium",
+                    "install_dir": browsers_path / "chromium",
+                    "candidates": [],
+                }
+            ]
 
-                chromium_entry = next(
-                    (
-                        b
-                        for b in data.get("browsers", [])
-                        if b["name"] == "chromium"
-                    ),
-                    None,
-                )
-                if chromium_entry:
-                    revision = chromium_entry["revision"]
-                    chromium_dir = browsers_path / f"chromium-{revision}"
+        descriptors = {
+            browser["name"]: browser
+            for browser in data.get("browsers", [])
+            if browser.get("name") in {"chromium", "chromium-headless-shell"}
+        }
+        if not descriptors:
+            return [
+                {
+                    "name": "chromium",
+                    "install_dir": browsers_path / "chromium",
+                    "candidates": [],
+                }
+            ]
 
-                    if chromium_dir.is_dir():
-                        system = platform.system()
-                        machine = platform.machine().lower()
-                        # Candidate executable sub-paths matching playwright's
-                        # EXECUTABLE_PATHS for each platform/arch.
-                        if system == "Linux":
-                            if machine == "aarch64":
-                                candidates = [("chrome-linux", "chrome")]
-                            else:
-                                candidates = [("chrome-linux64", "chrome")]
-                        elif system == "Darwin":
-                            base = (
-                                "chrome-mac-arm64"
-                                if machine == "arm64"
-                                else "chrome-mac-x64"
-                            )
-                            candidates = [
-                                (
-                                    base,
-                                    "Google Chrome for Testing.app",
-                                    "Contents",
-                                    "MacOS",
-                                    "Google Chrome for Testing",
-                                )
-                            ]
-                        elif system == "Windows":
-                            candidates = [("chrome-win64", "chrome.exe")]
-                        else:
-                            candidates = []
+        runtime_names = (
+            ["chromium-headless-shell"]
+            if "chromium-headless-shell" in descriptors
+            else ["chromium"]
+        )
 
-                        for parts in candidates:
-                            exe = chromium_dir.joinpath(*parts)
-                            if exe.exists():
-                                return True
-        except (ImportError, json.JSONDecodeError, KeyError, OSError) as exc:
-            logger.debug(f"Playwright chromium 版本检测失败，使用回退检测: {exc}")
-
-        # --- fallback: any non-empty chromium directory --------------------
-        try:
-            return any(
-                item.is_dir()
-                and item.name.startswith("chromium-")
-                and any(item.iterdir())
-                for item in browsers_path.iterdir()
+        requirements = []
+        for name in runtime_names:
+            descriptor = descriptors.get(name)
+            if not descriptor:
+                continue
+            install_dir = browsers_path / (
+                f"{name.replace('-', '_')}-{descriptor['revision']}"
             )
-        except Exception:
+            requirements.append(
+                {
+                    "name": name,
+                    "install_dir": install_dir,
+                    "candidates": PJSKPlugin._get_browser_executable_candidates(
+                        name,
+                        install_dir,
+                    ),
+                }
+            )
+        return requirements
+
+    @staticmethod
+    def _get_browser_executable_candidates(name: str, install_dir):
+        import platform
+
+        system = platform.system()
+        machine = platform.machine().lower()
+        is_arm = machine in {"arm64", "aarch64"}
+
+        def paths(*parts_list):
+            return [install_dir.joinpath(*parts) for parts in parts_list]
+
+        if name == "chromium-headless-shell":
+            if system == "Linux":
+                first = ("chrome-linux", "headless_shell") if is_arm else (
+                    "chrome-headless-shell-linux64",
+                    "chrome-headless-shell",
+                )
+                return paths(
+                    first,
+                    ("chrome-headless-shell-linux64", "chrome-headless-shell"),
+                    ("chrome-linux", "headless_shell"),
+                )
+            if system == "Darwin":
+                first = (
+                    "chrome-headless-shell-mac-arm64",
+                    "chrome-headless-shell",
+                ) if is_arm else (
+                    "chrome-headless-shell-mac-x64",
+                    "chrome-headless-shell",
+                )
+                return paths(
+                    first,
+                    ("chrome-headless-shell-mac-arm64", "chrome-headless-shell"),
+                    ("chrome-headless-shell-mac-x64", "chrome-headless-shell"),
+                    ("chrome-mac", "headless_shell"),
+                )
+            if system == "Windows":
+                return paths(
+                    ("chrome-headless-shell-win64", "chrome-headless-shell.exe"),
+                    ("chrome-win64", "headless_shell.exe"),
+                    ("chrome-win", "headless_shell.exe"),
+                )
+            return []
+
+        if system == "Linux":
+            first = ("chrome-linux", "chrome") if is_arm else (
+                "chrome-linux64",
+                "chrome",
+            )
+            return paths(
+                first,
+                ("chrome-linux64", "chrome"),
+                ("chrome-linux", "chrome"),
+            )
+        if system == "Darwin":
+            first = (
+                "chrome-mac-arm64",
+                "Google Chrome for Testing.app",
+                "Contents",
+                "MacOS",
+                "Google Chrome for Testing",
+            ) if is_arm else (
+                "chrome-mac-x64",
+                "Google Chrome for Testing.app",
+                "Contents",
+                "MacOS",
+                "Google Chrome for Testing",
+            )
+            return paths(
+                first,
+                (
+                    "chrome-mac-arm64",
+                    "Google Chrome for Testing.app",
+                    "Contents",
+                    "MacOS",
+                    "Google Chrome for Testing",
+                ),
+                (
+                    "chrome-mac-x64",
+                    "Google Chrome for Testing.app",
+                    "Contents",
+                    "MacOS",
+                    "Google Chrome for Testing",
+                ),
+                ("chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium"),
+            )
+        if system == "Windows":
+            return paths(
+                ("chrome-win64", "chrome.exe"),
+                ("chrome-win", "chrome.exe"),
+            )
+        return []
+
+    @staticmethod
+    def _is_executable_file(path) -> bool:
+        import os
+        import platform
+
+        if not path.is_file():
             return False
+        if platform.system() == "Windows":
+            return True
+        return os.access(path, os.X_OK)
+
+    @staticmethod
+    def _should_install_only_chromium_shell() -> bool:
+        requirements = PJSKPlugin._get_chromium_runtime_requirements()
+        return bool(requirements) and all(
+            item["name"] == "chromium-headless-shell" for item in requirements
+        )
+
+    async def _run_playwright_install(self, install_only_shell: bool) -> None:
+        import platform
+        import shlex
+        import sys
+
+        args = [sys.executable, "-m", "playwright", "install"]
+        if (
+            platform.system() == "Linux"
+            and plugin_config.pjsk_playwright_install_deps
+        ):
+            args.append("--with-deps")
+        if install_only_shell:
+            args.append("--only-shell")
+        args.append("chromium")
+
+        logger.info(f"执行 Playwright 安装命令: {shlex.join(args)}")
+        returncode, output = await self._run_playwright_command(args)
+        if returncode == 0:
+            return
+
+        if install_only_shell and self._is_unknown_playwright_option(output):
+            fallback_args = [arg for arg in args if arg != "--only-shell"]
+            logger.warning(
+                "当前 Playwright 不支持 --only-shell，改为安装完整 chromium"
+            )
+            logger.info(f"执行 Playwright 安装命令: {shlex.join(fallback_args)}")
+            returncode, output = await self._run_playwright_command(fallback_args)
+            if returncode == 0:
+                return
+
+        raise RuntimeError(f"Playwright chromium 安装失败: {output}")
+
+    async def _run_playwright_command(self, args):
+        import asyncio
+        import contextlib
+
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=plugin_config.pjsk_playwright_install_timeout,
+            )
+        except asyncio.TimeoutError as exc:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
+            raise RuntimeError("Playwright 安装超时") from exc
+        return proc.returncode, self._short_process_output(stdout, stderr)
+
+    @staticmethod
+    def _short_process_output(stdout: bytes, stderr: bytes) -> str:
+        parts = [
+            output.decode(errors="replace").strip()
+            for output in (stdout, stderr)
+            if output
+        ]
+        output = "\n".join(part for part in parts if part)
+        if len(output) > 2000:
+            output = output[-2000:]
+        return output or "无输出"
+
+    @staticmethod
+    def _is_unknown_playwright_option(output: str) -> bool:
+        lowered = output.lower()
+        return "unknown option" in lowered or "unknown argument" in lowered
 
     @filter.command("pjsk")
     async def pjsk_generate(self, event: AstrMessageEvent):

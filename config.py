@@ -9,6 +9,9 @@ DEFAULT_CONFIG = {
     "pjsk_req_timeout": 10,
     "pjsk_use_cache": True,
     "pjsk_clear_cache": False,
+    "pjsk_playwright_auto_install": True,
+    "pjsk_playwright_install_deps": False,
+    "pjsk_playwright_install_timeout": 300,
 }
 
 # Asset prefixes (not configurable via WebUI for simplicity)
@@ -72,6 +75,31 @@ class PluginConfig:
         return self._config.get("pjsk_clear_cache", DEFAULT_CONFIG["pjsk_clear_cache"])
 
     @property
+    def pjsk_playwright_auto_install(self) -> bool:
+        return self._config.get(
+            "pjsk_playwright_auto_install",
+            DEFAULT_CONFIG["pjsk_playwright_auto_install"],
+        )
+
+    @property
+    def pjsk_playwright_install_deps(self) -> bool:
+        return self._config.get(
+            "pjsk_playwright_install_deps",
+            DEFAULT_CONFIG["pjsk_playwright_install_deps"],
+        )
+
+    @property
+    def pjsk_playwright_install_timeout(self) -> int:
+        timeout = self._config.get(
+            "pjsk_playwright_install_timeout",
+            DEFAULT_CONFIG["pjsk_playwright_install_timeout"],
+        )
+        try:
+            return max(30, int(timeout))
+        except (TypeError, ValueError):
+            return DEFAULT_CONFIG["pjsk_playwright_install_timeout"]
+
+    @property
     def pjsk_req_proxy(self) -> Optional[str]:
         """Get proxy for requests.
 
@@ -91,4 +119,3 @@ class PluginConfig:
 
 # Global config instance (will be updated by main.py)
 config = PluginConfig()
-
