@@ -29,12 +29,6 @@
         "default": true,
         "hint": "启动时检测到 Chromium 运行文件缺失时，自动执行 playwright install"
     },
-    "pjsk_playwright_install_deps": {
-        "description": "安装 Playwright 系统依赖",
-        "type": "bool",
-        "default": false,
-        "hint": "仅 Linux 生效。启用后安装浏览器时附带 --with-deps，可能需要 root/sudo 权限"
-    },
     "pjsk_playwright_install_timeout": {
         "description": "Playwright 安装超时",
         "type": "int",

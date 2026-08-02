@@ -9,7 +9,7 @@ Project Sekai 表情包制作插件 for AstrBot
 - 生成 Project Sekai 风格的表情包
 - 支持自定义文字、位置、角度、大小、颜色等参数
 - 查看所有角色和表情 ID
-- 自动检查并按需安装 Playwright 浏览器
+- 自动检查并按需安装 Playwright 浏览器和 Linux 系统依赖
 
 ![wonderhoy](https://raw.githubusercontent.com/lgc-NB2Dev/readme/main/pjsk/wonderhoy.png)
 
@@ -18,7 +18,7 @@ Project Sekai 表情包制作插件 for AstrBot
 1. 将插件目录复制到 AstrBot 的 `data/plugins/` 目录
 2. 重启 AstrBot
 
-> 插件会在首次启动时自动安装 Playwright chromium 运行文件和所需资源。Linux 系统依赖默认不自动安装，如浏览器启动提示缺少依赖，可在配置中启用 `pjsk_playwright_install_deps` 或手动执行 `python -m playwright install-deps chromium`。
+> 插件启动时会检测 Playwright chromium 运行文件和 Linux 系统依赖。已安装时直接跳过，缺失时自动安装；系统依赖安装可能需要 root 权限。
 
 ## 使用方法
 
@@ -66,7 +66,6 @@ pjsk列表 Miku
 | `pjsk_use_cache` | 使用缓存 | true |
 | `pjsk_clear_cache` | 启动时清理缓存 | false |
 | `pjsk_playwright_auto_install` | 缺少 Chromium 运行文件时自动安装 | true |
-| `pjsk_playwright_install_deps` | Linux 安装浏览器时附带系统依赖安装 | false |
 | `pjsk_playwright_install_timeout` | Playwright 自动安装超时(秒) | 300 |
 
 ## 致谢

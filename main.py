@@ -112,7 +112,7 @@ def parse_args(args_str: str) -> dict:
     "astrbot_plugin_pjsk",
     "camera-2018&RC-CHN",
     "Project Sekai 表情包制作插件,参考https://github.com/Agnes4m/nonebot_plugin_pjsk编写",
-    "1.0.1",
+    "1.0.2",
     "https://github.com/camera-2018/astrbot_plugin_pjsk",
 )
 class PJSKPlugin(Star):
@@ -158,40 +158,84 @@ class PJSKPlugin(Star):
         missing = self._get_missing_chromium_runtime_files()
         if not missing:
             logger.info("Playwright chromium 运行文件已安装，跳过安装步骤")
+        else:
+            missing_names = ", ".join(item["name"] for item in missing)
+            missing_paths = "; ".join(str(item["install_dir"]) for item in missing)
+            if not plugin_config.pjsk_playwright_auto_install:
+                raise RuntimeError(
+                    "Playwright chromium 运行文件缺失且已关闭自动安装。"
+                    "请执行 `python -m playwright install chromium` 后重启插件。"
+                )
+
+            logger.info(
+                f"检测到 Playwright {missing_names} 缺失，正在按需安装: "
+                f"{missing_paths}"
+            )
+            await self._run_playwright_install(
+                install_only_shell=self._should_install_only_chromium_shell()
+            )
+
+            missing = self._get_missing_chromium_runtime_files()
+            if missing:
+                missing_paths = "; ".join(
+                    str(item["install_dir"]) for item in missing
+                )
+                raise RuntimeError(
+                    f"Playwright chromium 安装后仍缺少运行文件: {missing_paths}"
+                )
+
+            logger.info("Playwright chromium 运行文件安装成功")
+
+        await self._ensure_playwright_system_dependencies()
+
+    async def _ensure_playwright_system_dependencies(self) -> None:
+        """Install Linux browser dependencies only when Chromium cannot start."""
+        import platform
+
+        if platform.system() != "Linux":
             return
 
-        missing_names = ", ".join(item["name"] for item in missing)
-        missing_paths = "; ".join(str(item["install_dir"]) for item in missing)
-        if not plugin_config.pjsk_playwright_auto_install:
-            raise RuntimeError(
-                "Playwright chromium 运行文件缺失且已关闭自动安装。"
-                "请执行 `python -m playwright install chromium` 后重启插件。"
-            )
+        available, error = await self._can_launch_playwright_chromium()
+        if available:
+            logger.info("Playwright 系统依赖检测通过，跳过安装步骤")
+            return
 
-        logger.info(
-            f"检测到 Playwright {missing_names} 缺失，正在按需安装: {missing_paths}"
+        logger.warning(
+            f"Playwright Chromium 启动检测失败，将安装系统依赖: {error}"
         )
-        await self._run_playwright_install(
-            install_only_shell=self._should_install_only_chromium_shell()
-        )
+        await self._run_playwright_install_deps()
 
-        missing = self._get_missing_chromium_runtime_files()
-        if missing:
-            missing_paths = "; ".join(str(item["install_dir"]) for item in missing)
+        available, error = await self._can_launch_playwright_chromium()
+        if not available:
             raise RuntimeError(
-                f"Playwright chromium 安装后仍缺少运行文件: {missing_paths}"
+                f"Playwright 系统依赖安装后 Chromium 仍无法启动: {error}"
             )
+        logger.info("Playwright 系统依赖安装并检测成功")
 
-        logger.info("Playwright chromium 运行文件安装成功")
-        if not plugin_config.pjsk_playwright_install_deps:
-            import platform
+    @staticmethod
+    async def _can_launch_playwright_chromium():
+        """Use an actual headless launch as the system dependency check."""
+        from playwright.async_api import async_playwright
 
-            if platform.system() == "Linux":
-                logger.info(
-                    "如后续浏览器启动提示系统依赖缺失，可启用 "
-                    "pjsk_playwright_install_deps 或手动执行 "
-                    "`python -m playwright install-deps chromium`"
-                )
+        playwright = None
+        browser = None
+        try:
+            playwright = await async_playwright().start()
+            browser = await playwright.chromium.launch(headless=True)
+            return True, ""
+        except Exception as exc:
+            return False, str(exc)
+        finally:
+            if browser is not None:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            if playwright is not None:
+                try:
+                    await playwright.stop()
+                except Exception:
+                    pass
 
     @staticmethod
     def _get_browsers_path():
@@ -456,16 +500,10 @@ class PJSKPlugin(Star):
         )
 
     async def _run_playwright_install(self, install_only_shell: bool) -> None:
-        import platform
         import shlex
         import sys
 
         args = [sys.executable, "-m", "playwright", "install"]
-        if (
-            platform.system() == "Linux"
-            and plugin_config.pjsk_playwright_install_deps
-        ):
-            args.append("--with-deps")
         if install_only_shell:
             args.append("--only-shell")
         args.append("chromium")
@@ -486,6 +524,22 @@ class PJSKPlugin(Star):
                 return
 
         raise RuntimeError(f"Playwright chromium 安装失败: {output}")
+
+    async def _run_playwright_install_deps(self) -> None:
+        import shlex
+        import sys
+
+        args = [
+            sys.executable,
+            "-m",
+            "playwright",
+            "install-deps",
+            "chromium",
+        ]
+        logger.info(f"执行 Playwright 系统依赖安装命令: {shlex.join(args)}")
+        returncode, output = await self._run_playwright_command(args)
+        if returncode != 0:
+            raise RuntimeError(f"Playwright 系统依赖安装失败: {output}")
 
     async def _run_playwright_command(self, args):
         import asyncio
