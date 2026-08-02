@@ -112,7 +112,7 @@ def parse_args(args_str: str) -> dict:
     "astrbot_plugin_pjsk",
     "camera-2018&RC-CHN",
     "Project Sekai 表情包制作插件,参考https://github.com/Agnes4m/nonebot_plugin_pjsk编写",
-    "1.0.2",
+    "1.0.3",
     "https://github.com/camera-2018/astrbot_plugin_pjsk",
 )
 class PJSKPlugin(Star):
@@ -200,8 +200,14 @@ class PJSKPlugin(Star):
             logger.info("Playwright 系统依赖检测通过，跳过安装步骤")
             return
 
+        if not self._is_missing_playwright_dependency_error(error):
+            raise RuntimeError(
+                "Playwright Chromium 启动检测失败，但未检测到系统依赖缺失，"
+                f"已跳过自动安装: {error}"
+            )
+
         logger.warning(
-            f"Playwright Chromium 启动检测失败，将安装系统依赖: {error}"
+            f"检测到 Playwright 系统依赖缺失，将自动安装: {error}"
         )
         await self._run_playwright_install_deps()
 
@@ -236,6 +242,17 @@ class PJSKPlugin(Star):
                     await playwright.stop()
                 except Exception:
                     pass
+
+    @staticmethod
+    def _is_missing_playwright_dependency_error(error: str) -> bool:
+        """Return whether a launch error specifically reports missing host libs."""
+        lowered = error.lower()
+        dependency_markers = (
+            "host system is missing dependencies",
+            "error while loading shared libraries",
+            "missing libraries:",
+        )
+        return any(marker in lowered for marker in dependency_markers)
 
     @staticmethod
     def _get_browsers_path():
